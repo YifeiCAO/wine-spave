@@ -15,6 +15,15 @@ import random
 from torch.utils.data import Dataset, DataLoader
 from itertools import cycle
 
+try:
+    from tqdm import tqdm
+    HAS_TQDM = True
+except ImportError:
+    HAS_TQDM = False
+    # 如果没有tqdm，创建一个简单的替代
+    def tqdm(iterable, **kwargs):
+        return iterable
+
 from data import GridDataGenerator
 from models import get_model
 from country_task import CountryTaskDataGenerator
@@ -219,7 +228,13 @@ def meta_train(model, args, n_meta_iterations=10000, n_tasks_per_batch=4):
     
     meta_losses = []
     
-    for meta_iter in range(n_meta_iterations):
+    # 创建进度条
+    pbar = tqdm(range(n_meta_iterations), 
+                desc="Meta-Training", 
+                unit="iter",
+                ncols=100 if HAS_TQDM else None)
+    
+    for meta_iter in pbar:
         # Sample a batch of tasks
         tasks = [task_generator.generate_task() for _ in range(n_tasks_per_batch)]
         
@@ -298,9 +313,36 @@ def meta_train(model, args, n_meta_iterations=10000, n_tasks_per_batch=4):
         
         meta_losses.append(avg_meta_loss.item())
         
+        # 更新进度条显示
+        current_loss = avg_meta_loss.item()
+        if len(meta_losses) > 1:
+            # 计算移动平均（最近10次）
+            window = min(10, len(meta_losses))
+            avg_loss = sum(meta_losses[-window:]) / window
+            pbar.set_postfix({
+                'Loss': f'{current_loss:.4f}',
+                'Avg': f'{avg_loss:.4f}',
+                'Min': f'{min(meta_losses):.4f}'
+            })
+        else:
+            pbar.set_postfix({'Loss': f'{current_loss:.4f}'})
+        
+        # 每100次迭代打印详细信息
         if (meta_iter + 1) % 100 == 0:
-            avg_loss = sum(meta_losses[-100:]) / len(meta_losses[-100:])
-            print(f"Meta-Iteration {meta_iter+1}/{n_meta_iterations}, Avg Meta-Loss: {avg_loss:.4f}")
+            window = min(100, len(meta_losses))
+            avg_loss = sum(meta_losses[-window:]) / window
+            if HAS_TQDM:
+                pbar.write(f"Meta-Iteration {meta_iter+1}/{n_meta_iterations}, "
+                          f"Current Loss: {current_loss:.4f}, "
+                          f"Avg Loss (last {window}): {avg_loss:.4f}")
+            else:
+                print(f"Meta-Iteration {meta_iter+1}/{n_meta_iterations}, "
+                      f"Current Loss: {current_loss:.4f}, "
+                      f"Avg Loss (last {window}): {avg_loss:.4f}")
+    
+    # 关闭进度条
+    if HAS_TQDM:
+        pbar.close()
     
     print(f"\nMeta-Training完成!")
     print(f"  最终Meta-Loss: {meta_losses[-1]:.4f}")
@@ -442,20 +484,29 @@ def meta_test(model, args, grid_data_gen, country_data_gen, country_loader):
 def create_meta_learning_args(base_args):
     """
     Create arguments object with meta-learning specific parameters.
+    Note: This function preserves values from base_args if they exist.
     """
     class MetaArgs:
         def __init__(self, base_args):
-            # Copy all attributes from base_args
+            # Copy all attributes from base_args first
             for attr in dir(base_args):
                 if not attr.startswith('_'):
                     setattr(self, attr, getattr(base_args, attr))
             
-            # Meta-learning specific parameters
-            self.meta_lr = 0.001  # Meta-learning rate
-            self.n_support = 16   # Number of support samples per task
-            self.n_query = 32     # Number of query samples per task
-            self.n_meta_iterations = 10000  # Number of meta-training iterations
-            self.n_tasks_per_batch = 4      # Number of tasks per meta-batch
+            # Meta-learning specific parameters (only set defaults if not already in base_args)
+            # Since we copied all attributes above, we only need to set defaults for missing ones
+            if not hasattr(self, 'meta_lr'):
+                self.meta_lr = 0.001  # Meta-learning rate
+            if not hasattr(self, 'n_support'):
+                self.n_support = 16   # Number of support samples per task
+            if not hasattr(self, 'n_query'):
+                self.n_query = 32     # Number of query samples per task
+            # n_meta_iterations: 使用base_args中的值（如果已设置），否则使用默认值10000
+            if not hasattr(self, 'n_meta_iterations'):
+                self.n_meta_iterations = 10000  # Number of meta-training iterations (default)
+            # 注意：如果base_args中已经设置了n_meta_iterations，上面的复制已经包含了它，这里不会覆盖
+            if not hasattr(self, 'n_tasks_per_batch'):
+                self.n_tasks_per_batch = 4      # Number of tasks per meta-batch
     
     return MetaArgs(base_args)
 
