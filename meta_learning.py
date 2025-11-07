@@ -398,10 +398,12 @@ def meta_test(model, args, grid_data_gen, country_data_gen, country_loader):
         # For 2D countries: use samples that help infer the 2D preference
         support_set = []
         
+        # Get country attributes and direction (needed for both single and dual)
+        attrs = country_info[2]
+        direction = country_info[3] if len(country_info) > 3 else (1 if pref_type == 'single' else (1, 1))
+        
         if pref_type == 'single':
             # For 1D countries, create support samples using their 1D rule
-            attrs = country_info[2]
-            direction = country_info[3]
             ctx_idx = attrs[0]
             
             # Sample from grid_data_gen that match this 1D rule
@@ -454,6 +456,10 @@ def meta_test(model, args, grid_data_gen, country_data_gen, country_loader):
         query_samples = []
         correct_predictions = 0
         total_predictions = 0
+        
+        # Get country attributes and direction (needed for both single and dual)
+        attrs = country_info[2]
+        direction = country_info[3] if len(country_info) > 3 else (1 if pref_type == 'single' else (1, 1))
         
         for country_idx_q, wine1_idx, wine2_idx, correct_ans, info in country_samples[:32]:  # Test on first 32
             # Prepare input based on country preference
