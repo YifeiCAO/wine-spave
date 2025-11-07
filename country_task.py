@@ -81,7 +81,8 @@ class CountryTaskDataGenerator:
         """
         Generate samples for all countries.
         Each sample: (country_idx, wine1_idx, wine2_idx, correct_answer, info)
-        correct_answer: 0=wine1 better, 1=wine2 better, 2=equal
+        correct_answer: 0=wine1 better, 1=wine2 better
+        Note: This is a 2选1 task. If wines are equal, randomly choose one.
         """
         samples = []
         
@@ -103,6 +104,7 @@ class CountryTaskDataGenerator:
                     rank2 = loc2[ctx_idx]
                     
                     # Apply direction: 1 means higher is better, -1 means lower is better
+                    # For 2选1 task: if equal, randomly choose one (or skip)
                     if direction == 1:
                         # Higher is better
                         if rank1 > rank2:
@@ -110,7 +112,8 @@ class CountryTaskDataGenerator:
                         elif rank1 < rank2:
                             correct = 1  # wine2 is better
                         else:
-                            correct = 2  # equal
+                            # Equal case: for 2选1, randomly choose one
+                            correct = random.choice([0, 1])
                     else:  # direction == -1
                         # Lower is better
                         if rank1 < rank2:
@@ -118,7 +121,8 @@ class CountryTaskDataGenerator:
                         elif rank1 > rank2:
                             correct = 1  # wine2 is better
                         else:
-                            correct = 2  # equal
+                            # Equal case: for 2选1, randomly choose one
+                            correct = random.choice([0, 1])
                 
                 elif pref_type == 'dual':
                     # Dual attribute: combine both dimensions with their respective directions
@@ -144,7 +148,8 @@ class CountryTaskDataGenerator:
                     elif value1 < value2:
                         correct = 1  # wine2 is better
                     else:
-                        correct = 2  # equal
+                        # Equal case: for 2选1, randomly choose one
+                        correct = random.choice([0, 1])
                 
                 # Additional info
                 info = {
@@ -254,16 +259,16 @@ def test_country_task(model, loader, args, country_data_gen):
     """
     Test model on countries task.
     
-    The model needs to output 3 classes:
+    This is a 2选1 task (binary choice):
     - 0: wine1 is better for the country
     - 1: wine2 is better for the country
-    - 2: wines are equal for the country
+    
+    Model output should be 2 classes (binary classification).
     """
     model.eval()
     
-    # For countries task, we need 3-class output
-    # If model only has 2-class output, we'll need to handle it differently
-    # For now, assume model can be adapted or we use a wrapper
+    # This is a 2选1 task (binary classification)
+    # Model output is 2 classes: 0=wine1 better, 1=wine2 better
     
     with torch.no_grad():
         correct = []
@@ -304,27 +309,18 @@ def test_country_task(model, loader, args, country_data_gen):
                     ctx_idx = attrs[0]
                     ctx_tensor = torch.tensor([ctx_idx]).to(args.device)
                     
-                    # Get actual ranks to check for equality first
-                    loc1 = info['loc1'][i]
-                    loc2 = info['loc2'][i]
-                    rank1 = loc1[ctx_idx]
-                    rank2 = loc2[ctx_idx]
+                    # Run model with this context
+                    y_hat, _ = model(ctx_tensor, wine1_i, wine2_i)
+                    # y_hat: [1, 2] - 0 means wine1 better, 1 means wine2 better
+                    model_pred = torch.argmax(y_hat, dim=1).item()
                     
-                    if rank1 == rank2:
-                        pred = 2  # equal
-                    else:
-                        # Run model with this context
-                        y_hat, _ = model(ctx_tensor, wine1_i, wine2_i)
-                        # y_hat: [1, 2] - 0 means wine1 better, 1 means wine2 better
-                        model_pred = torch.argmax(y_hat, dim=1).item()
-                        
-                        # Apply direction: if direction=-1, we need to flip the prediction
-                        # because model was trained with direction=1 (higher is better)
-                        if direction == 1:
-                            pred = model_pred  # Higher is better, use model prediction directly
-                        else:  # direction == -1
-                            # Lower is better, flip the prediction
-                            pred = 1 - model_pred if model_pred != 2 else 2
+                    # Apply direction: if direction=-1, we need to flip the prediction
+                    # because model was trained with direction=1 (higher is better)
+                    if direction == 1:
+                        pred = model_pred  # Higher is better, use model prediction directly
+                    else:  # direction == -1
+                        # Lower is better, flip the prediction
+                        pred = 1 - model_pred  # For 2选1, just flip (no equal case)
                 
                 elif pref_type == 'dual':
                     # Dual attribute: combine both dimensions with their directions
@@ -349,7 +345,8 @@ def test_country_task(model, loader, args, country_data_gen):
                     elif value1 < value2:
                         pred = 1  # wine2 better
                     else:
-                        pred = 2  # equal
+                        # Equal case: for 2选1, randomly choose one
+                        pred = random.choice([0, 1])
                 
                 predictions.append(pred)
             
