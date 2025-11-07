@@ -567,6 +567,121 @@ def meta_test(model, args, grid_data_gen, country_data_gen, country_loader):
     return country_results
 
 
+def meta_test_simple(model, args, grid_data_gen, n_test_tasks=10):
+    """
+    简化的Meta-Testing: 直接测试1D到2D的泛化能力
+    
+    不需要country task，直接：
+    1. 生成1D support set
+    2. 测试2D query set
+    3. 计算准确率
+    
+    Args:
+        model: Meta-trained RNN model
+        args: Arguments object
+        grid_data_gen: GridDataGenerator for the specific 4x4 space
+        n_test_tasks: Number of test tasks to evaluate
+    """
+    device = args.device
+    model = model.to(device)
+    model.eval()  # Freeze weights
+    
+    # Wrap model for sequential processing
+    seq_model = SequentialRNN(model)
+    seq_model = seq_model.to(device)
+    
+    print(f"\n开始简化的Meta-Testing...")
+    print(f"  模型权重已冻结")
+    print(f"  测试任务数: {n_test_tasks}")
+    print(f"  核心测试: 1D → 2D 泛化能力\n")
+    
+    task_generator = MetaTaskGenerator(args, n_support=16, n_query=32)
+    all_accuracies = []
+    
+    for task_idx in range(n_test_tasks):
+        # Generate a test task (same as meta-training)
+        task = task_generator.generate_task()
+        
+        # Prepare support and query samples
+        def prepare_samples(samples):
+            ctx_list = []
+            f1_list = []
+            f2_list = []
+            y_list = []
+            
+            for ctx, loc1, loc2, y, info in samples:
+                ctx_list.append(ctx)
+                f1_idx = task.grid.loc2idx[loc1]
+                f2_idx = task.grid.loc2idx[loc2]
+                f1_tensor = task.grid.idx2tensor[f1_idx]
+                f2_tensor = task.grid.idx2tensor[f2_idx]
+                
+                if args.use_images:
+                    f1_list.append(f1_tensor)
+                    f2_list.append(f2_tensor)
+                else:
+                    if isinstance(f1_tensor, torch.Tensor):
+                        f1_list.append(f1_tensor)
+                        f2_list.append(f2_tensor)
+                    else:
+                        f1_list.append(torch.tensor(f1_tensor))
+                        f2_list.append(torch.tensor(f2_tensor))
+                y_list.append(y)
+            
+            ctx_tensor = torch.tensor(ctx_list).to(device)
+            if args.use_images:
+                f1_tensor = torch.stack(f1_list).to(device)
+                f2_tensor = torch.stack(f2_list).to(device)
+            else:
+                f1_tensor = torch.stack(f1_list).to(device)
+                f2_tensor = torch.stack(f2_list).to(device)
+            y_tensor = torch.tensor(y_list).to(device)
+            
+            return list(zip(ctx_tensor, f1_tensor, f2_tensor, y_tensor))
+        
+        support_samples = prepare_samples(task.support_set)
+        query_samples = prepare_samples(task.query_set)
+        
+        # Adaptation: Process support set
+        with torch.no_grad():
+            support_outputs, adapted_hidden = seq_model.forward_sequence(support_samples)
+        
+        # Evaluation: Test on query set
+        with torch.no_grad():
+            query_outputs, _ = seq_model.forward_sequence(query_samples, adapted_hidden)
+            
+            if len(query_outputs) > 0:
+                query_preds = torch.cat(query_outputs, dim=0)
+                query_labels = torch.cat([y.unsqueeze(0) if y.dim() == 0 else y for _, _, _, y in query_samples], dim=0)
+                
+                # Calculate accuracy
+                preds = torch.argmax(query_preds, dim=1)
+                correct = (preds == query_labels).float()
+                accuracy = correct.mean().item()
+                all_accuracies.append(accuracy)
+            else:
+                continue
+        
+        if (task_idx + 1) % 5 == 0:
+            avg_acc = sum(all_accuracies) / len(all_accuracies)
+            print(f"  任务 {task_idx+1}/{n_test_tasks}: 当前平均准确率 = {avg_acc:.4f} ({avg_acc*100:.2f}%)")
+    
+    final_accuracy = sum(all_accuracies) / len(all_accuracies) if all_accuracies else 0.0
+    print(f"\n✓ Meta-Testing完成!")
+    print(f"  最终平均准确率: {final_accuracy:.4f} ({final_accuracy*100:.2f}%)")
+    print(f"  测试任务数: {len(all_accuracies)}")
+    print(f"  随机猜测基线: 50.00% (2选1)")
+    
+    if final_accuracy > 0.66:
+        print(f"  ✓ 成功！准确率超过人类基线下限")
+    elif final_accuracy > 0.50:
+        print(f"  ⚠ 部分成功，准确率超过随机但未达到人类基线")
+    else:
+        print(f"  ✗ 需要改进，准确率接近随机水平")
+    
+    return final_accuracy, all_accuracies
+
+
 def create_meta_learning_args(base_args):
     """
     Create arguments object with meta-learning specific parameters.
