@@ -456,23 +456,56 @@ def meta_test(model, args, grid_data_gen, country_data_gen, country_loader):
         total_predictions = 0
         
         for country_idx_q, wine1_idx, wine2_idx, correct_ans, info in country_samples[:32]:  # Test on first 32
-            # Prepare input
-            ctx_tensor = torch.tensor([0]).to(device)  # Dummy context, will be handled by country preference
+            # Prepare input based on country preference
             f1_tensor = grid_data_gen.idx2tensor[wine1_idx].unsqueeze(0).to(device)
             f2_tensor = grid_data_gen.idx2tensor[wine2_idx].unsqueeze(0).to(device)
             
-            # Use adapted hidden state to make prediction
-            # For country task, we need to determine which context to use based on country preference
-            # This is simplified - in practice, you'd need to handle country-specific context selection
-            query_sample = [(ctx_tensor, f1_tensor, f2_tensor, torch.tensor([correct_ans]).to(device))]
-            
-            with torch.no_grad():
-                query_outputs, _ = seq_model.forward_sequence(query_sample, adapted_hidden)
-                pred = torch.argmax(query_outputs[0], dim=1).item()
+            # Determine context and prediction based on country preference
+            if pref_type == 'single':
+                # For 1D countries: use the context they care about
+                ctx_idx = attrs[0]
+                ctx_tensor = torch.tensor([ctx_idx]).to(device)
                 
-                if pred == correct_ans:
-                    correct_predictions += 1
-                total_predictions += 1
+                query_sample = [(ctx_tensor, f1_tensor, f2_tensor, torch.tensor([correct_ans]).to(device))]
+                
+                with torch.no_grad():
+                    query_outputs, _ = seq_model.forward_sequence(query_sample, adapted_hidden)
+                    model_pred = torch.argmax(query_outputs[0], dim=1).item()
+                    
+                    # Apply direction: if direction=-1, flip the prediction
+                    if direction == 1:
+                        pred = model_pred  # Higher is better
+                    else:  # direction == -1
+                        pred = 1 - model_pred  # Lower is better, flip
+            else:
+                # For 2D countries: need to combine predictions from both contexts
+                ctx_idx1, ctx_idx2 = attrs[0], attrs[1]
+                dir1, dir2 = direction[0], direction[1]
+                
+                # Get actual ranks from grid
+                loc1 = grid_data_gen.idx2loc[wine1_idx]
+                loc2 = grid_data_gen.idx2loc[wine2_idx]
+                rank1_ctx1, rank2_ctx1 = loc1[ctx_idx1], loc2[ctx_idx1]
+                rank1_ctx2, rank2_ctx2 = loc1[ctx_idx2], loc2[ctx_idx2]
+                
+                # Calculate combined value considering direction for each dimension
+                max_rank = grid_data_gen.size - 1
+                value1 = (rank1_ctx1 if dir1 == 1 else (max_rank - rank1_ctx1)) + \
+                        (rank1_ctx2 if dir2 == 1 else (max_rank - rank1_ctx2))
+                value2 = (rank2_ctx1 if dir1 == 1 else (max_rank - rank2_ctx1)) + \
+                        (rank2_ctx2 if dir2 == 1 else (max_rank - rank2_ctx2))
+                
+                if value1 > value2:
+                    pred = 0  # wine1 better
+                elif value1 < value2:
+                    pred = 1  # wine2 better
+                else:
+                    # Equal case: randomly choose
+                    pred = random.choice([0, 1])
+            
+            if pred == correct_ans:
+                correct_predictions += 1
+            total_predictions += 1
         
         acc = correct_predictions / total_predictions if total_predictions > 0 else 0.0
         country_results[country_name] = acc
