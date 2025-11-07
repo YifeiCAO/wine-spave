@@ -407,10 +407,36 @@ def meta_test(model, args, grid_data_gen, country_data_gen, country_loader):
             ctx_idx = attrs[0]
             
             # Sample from grid_data_gen that match this 1D rule
-            for sample in grid_data_gen.train[:32]:  # Use first 32 training samples
+            # Important: We need to match both context AND direction
+            for sample in grid_data_gen.train:
                 ctx, loc1, loc2, y, info = sample
                 if ctx == ctx_idx:  # Match the context
-                    support_set.append(sample)
+                    # Check if the sample's direction matches the country's direction
+                    # In grid.train, samples are generated with direction=1 (higher is better)
+                    # So y=0 means wine1 is better (wine1 has higher rank in ctx dimension)
+                    rank1 = loc1[ctx_idx]
+                    rank2 = loc2[ctx_idx]
+                    
+                    # Determine the sample's implicit direction
+                    if rank1 > rank2:
+                        # Wine1 has higher rank, so if y=0, direction is 1 (higher is better)
+                        sample_direction = 1
+                    elif rank1 < rank2:
+                        # Wine2 has higher rank, so if y=1, direction is 1 (higher is better)
+                        sample_direction = 1
+                    else:
+                        # Equal ranks, direction doesn't matter
+                        sample_direction = 0
+                    
+                    # For direction=-1 countries, we need to flip the labels in support set
+                    # so the model learns the correct preference
+                    if direction == -1:
+                        # Flip the label: if y=0 (wine1 better with direction=1), 
+                        # then with direction=-1, wine2 is better (y=1)
+                        flipped_sample = (ctx, loc1, loc2, 1 - y, info)
+                        support_set.append(flipped_sample)
+                    else:
+                        support_set.append(sample)
                     if len(support_set) >= 16:
                         break
         else:
@@ -484,27 +510,48 @@ def meta_test(model, args, grid_data_gen, country_data_gen, country_loader):
                     else:  # direction == -1
                         pred = 1 - model_pred  # Lower is better, flip
             else:
-                # For 2D countries: need to combine predictions from both contexts
+                # For 2D countries: use model to predict for both contexts, then combine
                 ctx_idx1, ctx_idx2 = attrs[0], attrs[1]
                 dir1, dir2 = direction[0], direction[1]
                 
-                # Get actual ranks from grid
-                loc1 = grid_data_gen.idx2loc[wine1_idx]
-                loc2 = grid_data_gen.idx2loc[wine2_idx]
-                rank1_ctx1, rank2_ctx1 = loc1[ctx_idx1], loc2[ctx_idx1]
-                rank1_ctx2, rank2_ctx2 = loc1[ctx_idx2], loc2[ctx_idx2]
+                # Predict using context 1
+                ctx1_tensor = torch.tensor([ctx_idx1]).to(device)
+                query_sample_ctx1 = [(ctx1_tensor, f1_tensor, f2_tensor, torch.tensor([correct_ans]).to(device))]
                 
-                # Calculate combined value considering direction for each dimension
-                max_rank = grid_data_gen.size - 1
-                value1 = (rank1_ctx1 if dir1 == 1 else (max_rank - rank1_ctx1)) + \
-                        (rank1_ctx2 if dir2 == 1 else (max_rank - rank1_ctx2))
-                value2 = (rank2_ctx1 if dir1 == 1 else (max_rank - rank2_ctx1)) + \
-                        (rank2_ctx2 if dir2 == 1 else (max_rank - rank2_ctx2))
+                with torch.no_grad():
+                    query_outputs_ctx1, _ = seq_model.forward_sequence(query_sample_ctx1, adapted_hidden)
+                    model_pred_ctx1 = torch.argmax(query_outputs_ctx1[0], dim=1).item()
+                    # Apply direction for ctx1
+                    if dir1 == 1:
+                        pred_ctx1 = model_pred_ctx1  # Higher is better
+                    else:
+                        pred_ctx1 = 1 - model_pred_ctx1  # Lower is better, flip
+                    # Convert to score: 0 means wine1 better, 1 means wine2 better
+                    score_ctx1 = 1 if pred_ctx1 == 1 else -1  # wine1 better = -1, wine2 better = +1
                 
-                if value1 > value2:
-                    pred = 0  # wine1 better
-                elif value1 < value2:
-                    pred = 1  # wine2 better
+                # Predict using context 2
+                ctx2_tensor = torch.tensor([ctx_idx2]).to(device)
+                query_sample_ctx2 = [(ctx2_tensor, f1_tensor, f2_tensor, torch.tensor([correct_ans]).to(device))]
+                
+                with torch.no_grad():
+                    query_outputs_ctx2, _ = seq_model.forward_sequence(query_sample_ctx2, adapted_hidden)
+                    model_pred_ctx2 = torch.argmax(query_outputs_ctx2[0], dim=1).item()
+                    # Apply direction for ctx2
+                    if dir2 == 1:
+                        pred_ctx2 = model_pred_ctx2  # Higher is better
+                    else:
+                        pred_ctx2 = 1 - model_pred_ctx2  # Lower is better, flip
+                    # Convert to score
+                    score_ctx2 = 1 if pred_ctx2 == 1 else -1
+                
+                # Combine scores from both contexts
+                # If both contexts agree, use that; if they disagree, use the stronger signal
+                combined_score = score_ctx1 + score_ctx2
+                
+                if combined_score < 0:
+                    pred = 0  # wine1 better (both contexts prefer wine1, or one strongly prefers wine1)
+                elif combined_score > 0:
+                    pred = 1  # wine2 better (both contexts prefer wine2, or one strongly prefers wine2)
                 else:
                     # Equal case: randomly choose
                     pred = random.choice([0, 1])
