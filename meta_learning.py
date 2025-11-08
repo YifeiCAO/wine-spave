@@ -69,21 +69,28 @@ class MetaTaskGenerator:
             inner_4x4=self.args.inner_4x4
         )
         
-        # Support set: Only 1D rules (context 0 or context 1, but not both)
+        # Support set: Only 1D rules with 1-level difference (adjacent pairs)
+        # Strategy: Include ALL pairs that have rank difference = 1 in the current context
+        # This ensures systematic learning of all adjacent relationships
         support_set = []
-        # Sample from training data, but only keep 1D samples
-        # 1D samples: samples where one dimension is the same (cong=0) or both point same direction
+        
         for sample in grid.train:
             ctx, loc1, loc2, y, info = sample
             # Only include samples where the rule is effectively 1D
-            # (i.e., one dimension dominates, or both dimensions agree)
             cong = info.get('cong', 0)
             if cong != -1:  # Exclude incongruent samples (they require 2D reasoning)
-                support_set.append(sample)
+                # Check if this is a 1-level difference in the current context
+                rank1 = loc1[ctx]
+                rank2 = loc2[ctx]
+                rank_diff = abs(rank1 - rank2)
+                
+                # Only include samples with rank difference = 1 (adjacent pairs)
+                if rank_diff == 1:
+                    support_set.append(sample)
         
-        # Randomly sample n_support samples
-        if len(support_set) > self.n_support:
-            support_set = random.sample(support_set, self.n_support)
+        # Use ALL 1-level difference samples (no random sampling)
+        # This ensures comprehensive learning of all adjacent relationships
+        # Note: n_support is now ignored, we use all available 1-level difference samples
         
         # Query set: 2D rules (both dimensions matter)
         query_set = []
@@ -95,9 +102,11 @@ class MetaTaskGenerator:
             if cong == -1:  # Only include incongruent samples
                 query_set.append(sample)
         
-        # Randomly sample n_query samples
+        # If we have fewer 2D samples than requested, use all available
+        # Otherwise, randomly sample n_query samples
         if len(query_set) > self.n_query:
             query_set = random.sample(query_set, self.n_query)
+        # If len(query_set) <= self.n_query, use all available samples
         
         return MetaTask(grid, support_set, query_set)
 
@@ -213,8 +222,10 @@ def meta_train(model, args, n_meta_iterations=10000, n_tasks_per_batch=4):
     seq_model = SequentialRNN(model)
     seq_model = seq_model.to(device)
     
-    # Create task generator
-    task_generator = MetaTaskGenerator(args)
+    # Create task generator (use args.n_support and args.n_query if available)
+    n_support = getattr(args, 'n_support', 16)
+    n_query = getattr(args, 'n_query', 32)
+    task_generator = MetaTaskGenerator(args, n_support=n_support, n_query=n_query)
     
     # Optimizer for meta-updates
     optimizer = torch.optim.Adam(model.parameters(), lr=args.meta_lr if hasattr(args, 'meta_lr') else 0.001)
@@ -595,7 +606,10 @@ def meta_test_simple(model, args, grid_data_gen, n_test_tasks=10):
     print(f"  测试任务数: {n_test_tasks}")
     print(f"  核心测试: 1D → 2D 泛化能力\n")
     
-    task_generator = MetaTaskGenerator(args, n_support=16, n_query=32)
+    # Use args.n_support and args.n_query if available, otherwise use defaults
+    n_support = getattr(args, 'n_support', 64)
+    n_query = getattr(args, 'n_query', 64)
+    task_generator = MetaTaskGenerator(args, n_support=n_support, n_query=n_query)
     all_accuracies = []
     
     for task_idx in range(n_test_tasks):
