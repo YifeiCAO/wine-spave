@@ -220,6 +220,9 @@ class SequentialRNNV2(nn.Module):
         
         # 添加规则向量embedding层（4维规则向量 -> state_dim）
         self.rule_embedding = nn.Linear(4, base_rnn.state_dim)
+        # 初始化规则向量embedding
+        nn.init.xavier_normal_(self.rule_embedding.weight)
+        nn.init.zeros_(self.rule_embedding.bias)
         
     def forward_sequence(self, samples, hidden_state=None):
         """
@@ -364,7 +367,8 @@ def meta_train_v2(model, args, n_meta_iterations=10000, n_tasks_per_batch=4):
     task_generator = MetaTaskGeneratorV2(args, n_support_per_rule=n_support_per_rule, n_query=n_query)
     
     # Optimizer for meta-updates
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.meta_lr if hasattr(args, 'meta_lr') else 0.001)
+    # 重要：需要包含seq_model的参数（包括rule_embedding层）
+    optimizer = torch.optim.Adam(seq_model.parameters(), lr=args.meta_lr if hasattr(args, 'meta_lr') else 0.001)
     loss_fn = nn.CrossEntropyLoss()
     
     print(f"开始Meta-Training V2...")
