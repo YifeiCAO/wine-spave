@@ -491,6 +491,12 @@ def meta_test_v2(model, args, n_test_tasks=10):
         model: Meta-trained RNN模型
         args: 参数对象
         n_test_tasks: 测试任务数
+    
+    Returns:
+        final_accuracy: 最终平均准确率
+        all_accuracies: 每个任务的准确率列表
+        rule_results: 按规则类型统计的结果
+        rank_diff_results: 按rank difference统计的结果
     """
     device = args.device
     model = model.to(device)
@@ -520,6 +526,8 @@ def meta_test_v2(model, args, n_test_tasks=10):
     all_accuracies = []
     # 详细结果：按规则类型统计
     rule_results = {}  # {rule_name: {'correct': int, 'total': int, 'accuracies': list}}
+    # 详细结果：按rank difference统计
+    rank_diff_results = {}  # {rank_diff: {'correct': int, 'total': int, 'accuracies': list}}
     
     # 规则名称映射
     def get_rule_name(rule_vector):
@@ -577,18 +585,37 @@ def meta_test_v2(model, args, n_test_tasks=10):
                 accuracy = correct.mean().item()
                 all_accuracies.append(accuracy)
                 
-                # 按规则类型统计
-                for i, (rule_vector, _, _, label) in enumerate(query_samples):
+                # 按规则类型和rank difference统计
+                for i, (rule_vector, wine_id1, wine_id2, label) in enumerate(query_samples):
+                    # 规则类型统计
                     rule_name = get_rule_name(rule_vector)
                     if rule_name not in rule_results:
                         rule_results[rule_name] = {'correct': 0, 'total': 0, 'accuracies': []}
                     
                     rule_results[rule_name]['total'] += 1
-                    if preds[i].item() == label:
+                    is_correct = (preds[i].item() == label)
+                    if is_correct:
                         rule_results[rule_name]['correct'] += 1
+                    rule_results[rule_name]['accuracies'].append(1.0 if is_correct else 0.0)
                     
-                    # 记录这个样本的准确率（0或1）
-                    rule_results[rule_name]['accuracies'].append(1.0 if preds[i].item() == label else 0.0)
+                    # Rank difference统计
+                    # 获取wine的位置
+                    loc1 = task.grid.idx2loc[wine_id1]
+                    loc2 = task.grid.idx2loc[wine_id2]
+                    
+                    # 计算rank difference（在规则对应的维度上）
+                    grid_size = args.grid_size
+                    value1 = get_wine_attribute_value(loc1, rule_vector, grid_size)
+                    value2 = get_wine_attribute_value(loc2, rule_vector, grid_size)
+                    rank_diff = abs(value1 - value2)
+                    
+                    if rank_diff not in rank_diff_results:
+                        rank_diff_results[rank_diff] = {'correct': 0, 'total': 0, 'accuracies': []}
+                    
+                    rank_diff_results[rank_diff]['total'] += 1
+                    if is_correct:
+                        rank_diff_results[rank_diff]['correct'] += 1
+                    rank_diff_results[rank_diff]['accuracies'].append(1.0 if is_correct else 0.0)
             else:
                 continue
         
@@ -607,5 +634,5 @@ def meta_test_v2(model, args, n_test_tasks=10):
     else:
         print(f"  ⚠ 需要改进，准确率接近随机水平")
     
-    return final_accuracy, all_accuracies, rule_results
+    return final_accuracy, all_accuracies, rule_results, rank_diff_results
 
