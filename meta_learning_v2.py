@@ -218,11 +218,15 @@ class SequentialRNNV2(nn.Module):
         self.base_rnn = base_rnn
         self.hidden_dim = base_rnn.hidden_dim
         
-        # 添加规则向量embedding层（4维规则向量 -> state_dim）
-        self.rule_embedding = nn.Linear(4, base_rnn.state_dim)
-        # 初始化规则向量embedding
-        nn.init.xavier_normal_(self.rule_embedding.weight)
-        nn.init.zeros_(self.rule_embedding.bias)
+        # 规则向量embedding层应该在base_rnn中，如果不存在则创建
+        if not hasattr(base_rnn, 'rule_embedding'):
+            base_rnn.rule_embedding = nn.Linear(4, base_rnn.state_dim).to(next(base_rnn.parameters()).device)
+            # 初始化规则向量embedding
+            nn.init.xavier_normal_(base_rnn.rule_embedding.weight)
+            nn.init.zeros_(base_rnn.rule_embedding.bias)
+        
+        # 使用base_rnn中的rule_embedding
+        self.rule_embedding = base_rnn.rule_embedding
         
     def forward_sequence(self, samples, hidden_state=None):
         """
@@ -357,6 +361,13 @@ def meta_train_v2(model, args, n_meta_iterations=10000, n_tasks_per_batch=4):
         model.out = nn.Linear(model.hidden_dim, 3).to(device)
         print(f"修改模型输出维度为3类")
     
+    # 确保模型有rule_embedding层（如果还没有）
+    if not hasattr(model, 'rule_embedding'):
+        model.rule_embedding = nn.Linear(4, model.state_dim).to(device)
+        nn.init.xavier_normal_(model.rule_embedding.weight)
+        nn.init.zeros_(model.rule_embedding.bias)
+        print(f"添加规则向量embedding层到模型")
+    
     # Wrap model for sequential processing
     seq_model = SequentialRNNV2(model)
     seq_model = seq_model.to(device)
@@ -367,8 +378,10 @@ def meta_train_v2(model, args, n_meta_iterations=10000, n_tasks_per_batch=4):
     task_generator = MetaTaskGeneratorV2(args, n_support_per_rule=n_support_per_rule, n_query=n_query)
     
     # Optimizer for meta-updates
-    # 重要：需要包含seq_model的参数（包括rule_embedding层）
-    optimizer = torch.optim.Adam(seq_model.parameters(), lr=args.meta_lr if hasattr(args, 'meta_lr') else 0.001)
+    # 重要：需要包含model的所有参数（包括rule_embedding层）和seq_model的参数
+    # 由于rule_embedding在model中，我们需要确保包含所有参数
+    all_params = list(model.parameters())
+    optimizer = torch.optim.Adam(all_params, lr=args.meta_lr if hasattr(args, 'meta_lr') else 0.001)
     loss_fn = nn.CrossEntropyLoss()
     
     print(f"开始Meta-Training V2...")
@@ -475,6 +488,13 @@ def meta_test_v2(model, args, n_test_tasks=10):
     device = args.device
     model = model.to(device)
     model.eval()  # 冻结权重
+    
+    # 确保模型有rule_embedding层（应该已经有了，从训练中继承）
+    if not hasattr(model, 'rule_embedding'):
+        print("⚠ 警告: 模型没有rule_embedding层，将创建新的（但权重未训练）")
+        model.rule_embedding = nn.Linear(4, model.state_dim).to(device)
+        nn.init.xavier_normal_(model.rule_embedding.weight)
+        nn.init.zeros_(model.rule_embedding.bias)
     
     # Wrap model for sequential processing
     seq_model = SequentialRNNV2(model)
