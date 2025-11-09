@@ -218,15 +218,13 @@ class SequentialRNNV2(nn.Module):
         self.base_rnn = base_rnn
         self.hidden_dim = base_rnn.hidden_dim
         
-        # 规则向量embedding层应该在base_rnn中，如果不存在则创建
+        # 规则向量embedding层应该在base_rnn中
+        # 如果不存在，说明应该在meta_train_v2中已经创建了，这里不应该创建新的
         if not hasattr(base_rnn, 'rule_embedding'):
-            base_rnn.rule_embedding = nn.Linear(4, base_rnn.state_dim).to(next(base_rnn.parameters()).device)
-            # 初始化规则向量embedding
-            nn.init.xavier_normal_(base_rnn.rule_embedding.weight)
-            nn.init.zeros_(base_rnn.rule_embedding.bias)
+            raise RuntimeError("rule_embedding should be added to model before creating SequentialRNNV2!")
         
-        # 使用base_rnn中的rule_embedding
-        self.rule_embedding = base_rnn.rule_embedding
+        # 直接使用base_rnn中的rule_embedding（不创建新引用）
+        # 这样确保训练和测试使用同一个实例
         
     def forward_sequence(self, samples, hidden_state=None):
         """
@@ -272,8 +270,8 @@ class SequentialRNNV2(nn.Module):
             
             batch_size = rule_vector.shape[0]
             
-            # 获取embeddings
-            rule_embed = self.rule_embedding(rule_vector)  # [batch, state_dim]
+            # 获取embeddings（使用base_rnn中的rule_embedding）
+            rule_embed = self.base_rnn.rule_embedding(rule_vector)  # [batch, state_dim]
             
             # 获取wine embeddings
             # 从grid获取idx2tensor（在meta_train_v2中设置）
@@ -378,10 +376,19 @@ def meta_train_v2(model, args, n_meta_iterations=10000, n_tasks_per_batch=4):
     task_generator = MetaTaskGeneratorV2(args, n_support_per_rule=n_support_per_rule, n_query=n_query)
     
     # Optimizer for meta-updates
-    # 重要：需要包含model的所有参数（包括rule_embedding层）和seq_model的参数
-    # 由于rule_embedding在model中，我们需要确保包含所有参数
-    all_params = list(model.parameters())
-    optimizer = torch.optim.Adam(all_params, lr=args.meta_lr if hasattr(args, 'meta_lr') else 0.001)
+    # 重要：需要包含model的所有参数（包括rule_embedding层）
+    # 验证rule_embedding是否在model中
+    if not hasattr(model, 'rule_embedding'):
+        raise RuntimeError("rule_embedding should have been added to model!")
+    
+    # 检查参数数量（用于调试）
+    param_count = sum(p.numel() for p in model.parameters())
+    rule_embedding_params = sum(p.numel() for p in model.rule_embedding.parameters())
+    print(f"  模型总参数数: {param_count}")
+    print(f"  rule_embedding参数数: {rule_embedding_params} (应该是160: 4*32+32)")
+    
+    # 使用model.parameters()，这会自动包含rule_embedding（PyTorch会自动注册）
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.meta_lr if hasattr(args, 'meta_lr') else 0.001)
     loss_fn = nn.CrossEntropyLoss()
     
     print(f"开始Meta-Training V2...")
@@ -511,6 +518,36 @@ def meta_test_v2(model, args, n_test_tasks=10):
     task_generator = MetaTaskGeneratorV2(args, n_support_per_rule=n_support_per_rule, n_query=n_query)
     
     all_accuracies = []
+    # 详细结果：按规则类型统计
+    rule_results = {}  # {rule_name: {'correct': int, 'total': int, 'accuracies': list}}
+    
+    # 规则名称映射
+    def get_rule_name(rule_vector):
+        # 转换为列表进行比较（如果是tensor）
+        if isinstance(rule_vector, torch.Tensor):
+            rule_vector = rule_vector.cpu().tolist()
+        elif not isinstance(rule_vector, list):
+            rule_vector = list(rule_vector)
+        
+        # 比较规则向量
+        if rule_vector == RULE_SWEET:
+            return "Sweet"
+        elif rule_vector == RULE_DRY:
+            return "Dry"
+        elif rule_vector == RULE_LIGHT:
+            return "Light"
+        elif rule_vector == RULE_FULL:
+            return "Full"
+        elif rule_vector == RULE_SWEET_LIGHT:
+            return "Sweet+Light"
+        elif rule_vector == RULE_SWEET_FULL:
+            return "Sweet+Full"
+        elif rule_vector == RULE_DRY_LIGHT:
+            return "Dry+Light"
+        elif rule_vector == RULE_DRY_FULL:
+            return "Dry+Full"
+        else:
+            return str(rule_vector)
     
     for task_idx in range(n_test_tasks):
         # 生成测试任务
@@ -539,6 +576,19 @@ def meta_test_v2(model, args, n_test_tasks=10):
                 correct = (preds == query_labels).float()
                 accuracy = correct.mean().item()
                 all_accuracies.append(accuracy)
+                
+                # 按规则类型统计
+                for i, (rule_vector, _, _, label) in enumerate(query_samples):
+                    rule_name = get_rule_name(rule_vector)
+                    if rule_name not in rule_results:
+                        rule_results[rule_name] = {'correct': 0, 'total': 0, 'accuracies': []}
+                    
+                    rule_results[rule_name]['total'] += 1
+                    if preds[i].item() == label:
+                        rule_results[rule_name]['correct'] += 1
+                    
+                    # 记录这个样本的准确率（0或1）
+                    rule_results[rule_name]['accuracies'].append(1.0 if preds[i].item() == label else 0.0)
             else:
                 continue
         
@@ -557,5 +607,5 @@ def meta_test_v2(model, args, n_test_tasks=10):
     else:
         print(f"  ⚠ 需要改进，准确率接近随机水平")
     
-    return final_accuracy, all_accuracies
+    return final_accuracy, all_accuracies, rule_results
 
